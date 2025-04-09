@@ -44,11 +44,14 @@ func (s syncActions) TerminalString() string {
 }
 
 // computeSyncActions determines the actions that should be taken based on the inputs provided. The inputs are the current
-// state of the batcher (blocks and channels), the new sync status, and the previous current L1 block. The actions are returned
-// in a struct specifying the number of blocks to prune, the number of channels to prune, whether to wait for node sync, the block
-// range to load into the local state, and whether to clear the state entirely. Returns a boolean indicating if the sequencer is out of sync.
+// state of the batcher (blocks and channels), the new sync status, the previous current L1 block, and the highest L2 block
+// which has been attested to by the UVN.
+// The actions are returned in a struct specifying the number of blocks to prune, the number of channels to prune,
+// whether to wait for node sync, the block range to load into the local state, and whether to clear the state entirely.
+// Returns a boolean indicating if the sequencer is out of sync.
 func computeSyncActions[T channelStatuser](
 	newSyncStatus eth.SyncStatus,
+	attestedBlock uint64,
 	prevCurrentL1 eth.L1BlockRef,
 	blocks queue.Queue[*types.Block],
 	channels []T,
@@ -83,8 +86,8 @@ func computeSyncActions[T channelStatuser](
 	}
 
 	var allUnsafeBlocks *inclusiveBlockRange
-	if newSyncStatus.UnsafeL2.Number > safeL2.Number {
-		allUnsafeBlocks = &inclusiveBlockRange{safeL2.Number + 1, newSyncStatus.UnsafeL2.Number}
+	if attestedBlock > safeL2.Number {
+		allUnsafeBlocks = &inclusiveBlockRange{safeL2.Number + 1, attestedBlock}
 	}
 
 	// PART 2: checks involving only the oldest block in the state
@@ -170,8 +173,8 @@ func computeSyncActions[T channelStatuser](
 	}
 
 	var allUnsafeBlocksAboveState *inclusiveBlockRange
-	if newSyncStatus.UnsafeL2.Number > newestBlockInStateNum {
-		allUnsafeBlocksAboveState = &inclusiveBlockRange{newestBlockInStateNum + 1, newSyncStatus.UnsafeL2.Number}
+	if attestedBlock > newestBlockInStateNum {
+		allUnsafeBlocksAboveState = &inclusiveBlockRange{newestBlockInStateNum + 1, attestedBlock}
 	}
 
 	a := syncActions{

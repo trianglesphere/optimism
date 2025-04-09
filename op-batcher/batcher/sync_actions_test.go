@@ -335,7 +335,7 @@ func TestBatchSubmitter_computeSyncActions(t *testing.T) {
 			l, h := testlog.CaptureLogger(t, log.LevelDebug)
 
 			result, outOfSync := computeSyncActions(
-				tc.newSyncStatus, tc.prevCurrentL1, tc.blocks, tc.channels, l, tc.preferLocalSafeL2,
+				tc.newSyncStatus, tc.newSyncStatus.UnsafeL2.Number, tc.prevCurrentL1, tc.blocks, tc.channels, l, tc.preferLocalSafeL2,
 			)
 
 			require.Equal(t, tc.expected, result, "unexpected actions")

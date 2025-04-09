@@ -7,16 +7,20 @@ import (
 	"io"
 	"math/big"
 	_ "net/http/pprof"
+	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
 
@@ -353,6 +357,102 @@ func (l *BatchSubmitter) getSyncStatus(ctx context.Context) (*eth.SyncStatus, er
 	return syncStatus, nil
 }
 
+// Status represents the enum values from the contract
+type Status uint8
+
+const (
+	NonExistent Status = iota
+	Pending
+	Scheduled
+	Delayed
+	Active
+	Finalized
+)
+
+// ContractABI is the partial ABI for the IRewardDistributor contract
+const ContractABI = `[
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "targetBlockNumber",
+        "type": "uint256"
+      }
+    ],
+    "name": "status",
+    "outputs": [
+      {
+        "internalType": "enum IRewardDistributor.Status",
+        "name": "",
+        "type": "uint8"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  }
+]`
+
+func (l *BatchSubmitter) blockAttested(ctx context.Context, number uint64) (bool, error) {
+	parsedABI, err := abi.JSON(strings.NewReader(ContractABI))
+	if err != nil {
+		return false, fmt.Errorf("failed to parse contract ABI: %w", err)
+	}
+
+	address := common.HexToAddress("TODO")
+
+	// Pack the function call data
+	data, err := parsedABI.Pack("status", number)
+	if err != nil {
+		return false, fmt.Errorf("failed to pack function data: %w", err)
+	}
+	client, err := l.EndpointProvider.EthClient(ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to dial client: %w", err)
+	}
+	cl2 := ethclient.NewClient(client.Client())
+
+	// Make the call
+	result, err := cl2.CallContract(ctx, ethereum.CallMsg{
+		To:   &address,
+		Data: data,
+	}, nil)
+	if err != nil {
+		return false, fmt.Errorf("contract call failed: %w", err)
+	}
+
+	// The result should be a 32-byte value with the status in the last byte
+	if len(result) < 32 {
+		return false, fmt.Errorf("unexpected result length: got %d, want at least 32", len(result))
+	}
+
+	// Extract the status value (last byte in the 32-byte word)
+	statusValue := Status(result[31])
+
+	// Return true if the status is Finalized
+	return statusValue == Finalized, nil
+}
+
+func (l *BatchSubmitter) getAttestedBlock(ctx context.Context, safeBlock, unsafeBlock uint64) (uint64, error) {
+	return searchAttestation(ctx, safeBlock, unsafeBlock, func(ctx context.Context, n uint64) (bool, error) { return l.blockAttested(ctx, n) })
+}
+
+func searchAttestation(ctx context.Context, safeBlock, unsafeBlock uint64, blockAttested func(ctx context.Context, number uint64) (bool, error)) (uint64, error) {
+	low := safeBlock
+	high := unsafeBlock
+
+	for low < high {
+		mid := (low + high) / 2
+		if attested, err := blockAttested(ctx, mid); err != nil {
+			return 0, err
+		} else if attested {
+			high = mid + 1
+		} else {
+			low = mid
+		}
+	}
+	return low, nil
+}
+
 // The following things occur:
 // New L2 block (reorg or not)
 // L1 transaction is confirmed
@@ -417,12 +517,12 @@ func (l *BatchSubmitter) setTxPoolState(txPoolState TxPoolState, txPoolBlockedBl
 
 // syncAndPrune computes actions to take based on the current sync status, prunes the channel manager state
 // and returns blocks to load.
-func (l *BatchSubmitter) syncAndPrune(syncStatus *eth.SyncStatus) *inclusiveBlockRange {
+func (l *BatchSubmitter) syncAndPrune(syncStatus *eth.SyncStatus, attestedBlock uint64) *inclusiveBlockRange {
 	l.channelMgrMutex.Lock()
 	defer l.channelMgrMutex.Unlock()
 
 	// Decide appropriate actions
-	syncActions, outOfSync := computeSyncActions(*syncStatus, l.prevCurrentL1, l.channelMgr.blocks, l.channelMgr.channelQueue, l.Log, l.Config.PreferLocalSafeL2)
+	syncActions, outOfSync := computeSyncActions(*syncStatus, attestedBlock, l.prevCurrentL1, l.channelMgr.blocks, l.channelMgr.channelQueue, l.Log, l.Config.PreferLocalSafeL2)
 
 	if outOfSync {
 		// If the sequencer is out of sync
@@ -502,7 +602,13 @@ func (l *BatchSubmitter) blockLoadingLoop(ctx context.Context, wg *sync.WaitGrou
 				continue
 			}
 
-			blocksToLoad := l.syncAndPrune(syncStatus)
+			attestedBlock, err := l.getAttestedBlock(ctx, syncStatus.SafeL2.Number, syncStatus.UnsafeL2.Number)
+			if err != nil {
+				l.Log.Warn("could not get attested block", "err", err)
+				continue
+			}
+
+			blocksToLoad := l.syncAndPrune(syncStatus, attestedBlock)
 
 			if blocksToLoad != nil {
 				// Get fresh unsafe blocks
