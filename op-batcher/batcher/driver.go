@@ -398,7 +398,7 @@ func (l *BatchSubmitter) blockAttested(ctx context.Context, number uint64) (bool
 		return false, fmt.Errorf("failed to parse contract ABI: %w", err)
 	}
 
-	address := common.HexToAddress("TODO")
+	address := common.HexToAddress("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0")
 
 	// Pack the function call data
 	data, err := parsedABI.Pack("status", number)
